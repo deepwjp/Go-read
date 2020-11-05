@@ -10,6 +10,7 @@ import (
 	"unsafe"
 )
 
+// slice结构体
 type slice struct {
 	array unsafe.Pointer
 	len   int
@@ -32,6 +33,7 @@ func panicmakeslicecap() {
 }
 
 func makeslice(et *_type, len, cap int) unsafe.Pointer {
+	// 算一下cap大小需要的内存，overflow是是否超过最大寻址地址
 	mem, overflow := math.MulUintptr(et.size, uintptr(cap))
 	if overflow || mem > maxAlloc || len < 0 || len > cap {
 		// NOTE: Produce a 'len out of range' error instead of a
@@ -46,6 +48,7 @@ func makeslice(et *_type, len, cap int) unsafe.Pointer {
 		panicmakeslicecap()
 	}
 
+	// 申请内存
 	return mallocgc(mem, et, true)
 }
 
@@ -73,7 +76,11 @@ func makeslice64(et *_type, len64, cap64 int64) unsafe.Pointer {
 // to calculate where to write new values during an append.
 // TODO: When the old backend is gone, reconsider this decision.
 // The SSA backend might prefer the new length or to return only ptr/cap and save stack space.
+
+// 如果slice的容量不够用，就是用growslice扩容
+// cap 是新slice需要的最小容量
 func growslice(et *_type, old slice, cap int) slice {
+	// 检测是否有数据竞争
 	if raceenabled {
 		callerpc := getcallerpc()
 		racereadrangepc(old.array, uintptr(old.len*int(et.size)), callerpc, funcPC(growslice))
@@ -81,38 +88,47 @@ func growslice(et *_type, old slice, cap int) slice {
 	if msanenabled {
 		msanread(old.array, uintptr(old.len*int(et.size)))
 	}
-
+	// 如果新要扩容的容量比原来的容量还要小，这代表要缩容了，那么可以直接报panic了。
 	if cap < old.cap {
 		panic(errorString("growslice: cap out of range"))
 	}
-
+	// 如果当前切片的大小为0，还调用了扩容方法，那么就新生成一个新的容量的切片返回。
 	if et.size == 0 {
 		// append should not create a slice with nil pointer but non-zero len.
 		// We assume that append doesn't need to preserve old.array in this case.
 		return slice{unsafe.Pointer(&zerobase), old.len, cap}
 	}
 
+	// 扩容
 	newcap := old.cap
+	//扩容是旧的大小的双倍扩容
 	doublecap := newcap + newcap
+	//如果需要的新cap比两倍大小还大就直接扩到新cap大小
 	if cap > doublecap {
 		newcap = cap
 	} else {
+		// 旧的slice元素在1024内就直接双倍大小
 		if old.len < 1024 {
 			newcap = doublecap
 		} else {
 			// Check 0 < newcap to detect overflow
 			// and prevent an infinite loop.
+			// 如果 >=1024 就一直1.25倍扩大到比需要的cap大
 			for 0 < newcap && newcap < cap {
 				newcap += newcap / 4
 			}
 			// Set newcap to the requested cap when
 			// the newcap calculation overflowed.
+			// 溢出
+			// 直接扩容到cap
 			if newcap <= 0 {
 				newcap = cap
 			}
 		}
 	}
 
+	// 计算新的切片的容量，长度。
+	// 不同size大小不同的迁移方法
 	var overflow bool
 	var lenmem, newlenmem, capmem uintptr
 	// Specialize for common values of et.size.
@@ -123,6 +139,7 @@ func growslice(et *_type, old slice, cap int) slice {
 	case et.size == 1:
 		lenmem = uintptr(old.len)
 		newlenmem = uintptr(cap)
+		// 匹配相应规格大小的内存
 		capmem = roundupsize(uintptr(newcap))
 		overflow = uintptr(newcap) > maxAlloc
 		newcap = int(capmem)
@@ -185,6 +202,7 @@ func growslice(et *_type, old slice, cap int) slice {
 			bulkBarrierPreWriteSrcOnly(uintptr(p), uintptr(old.array), lenmem)
 		}
 	}
+	// 迁移旧数据
 	memmove(p, old.array, lenmem)
 
 	return slice{p, old.len, newcap}
